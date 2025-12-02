@@ -60,7 +60,7 @@ GITHUB_URL = "https://github.com/streamlit/streamlit-assistant"
 
 DEBUG_MODE = st.query_params.get("debug", "false").lower() == "true"
 
-INSTRUCTIONS2 = textwrap.dedent("""
+INSTRUCTIONS = textwrap.dedent("""
 You are a very strong reasoner and planner. Use these critical instructions to structure your plans, thoughts, and responses.
 Before taking any action (either tool calls or responses to the user), you must proactively, methodically, and independently plan and reason about:
 
@@ -189,6 +189,9 @@ def build_question_prompt(question):
         recent_history_str = None
 
     context = {}
+    
+    # Initialize sources list
+    found_sources = []
 
     # 1. Summarize old history if it exists
     if SUMMARIZE_OLD_HISTORY and old_history:
@@ -197,16 +200,19 @@ def build_question_prompt(question):
 
     # 2. Search local FAISS for context
     if PAGES_CONTEXT_LEN:
-        context["documentation_pages"] = search_relevant_pages(question)
+        # UNPACK THE TUPLE HERE
+        context_str, found_sources = search_relevant_pages(question)
+        context["documentation_pages"] = context_str
 
-    # Note: We removed 'command_docstrings' because that relied on 'root' (Snowflake)
-
-    return build_prompt(
-        instructions=INSTRUCTIONS2,
+    prompt_str = build_prompt(
+        instructions=INSTRUCTIONS,
         **context,
         recent_messages=recent_history_str,
         question=question,
     )
+    
+    # RETURN BOTH PROMPT AND SOURCES
+    return prompt_str, found_sources
 
 
 def generate_chat_summary(messages):
@@ -228,10 +234,9 @@ def history_to_text(chat_history):
 
 def search_relevant_pages(query):
     if not vector_store:
-        return "No local knowledge base found."
+        return "No local knowledge base found.", [] # Return empty list
 
     # Perform similarity search
-    # k=5 means retrieve top 5 most relevant chunks
     results = vector_store.similarity_search(query, k=5)
 
     # Format the results into a string for the prompt
@@ -239,7 +244,10 @@ def search_relevant_pages(query):
         f"[Source: {doc.metadata.get('source', 'unknown')}]: {doc.page_content}" 
         for doc in results
     ]
-    return "\n\n".join(context_list)
+    context_str = "\n\n".join(context_list)
+    
+    # RETURN BOTH THE STRING AND THE RAW RESULTS
+    return context_str, results
 
 
 # def search_relevant_docstrings(query):
@@ -441,12 +449,12 @@ if user_message:
         # Build a detailed prompt.
         if DEBUG_MODE:
             with st.status("Computing prompt...") as status:
-                full_prompt = build_question_prompt(user_message)
+                full_prompt, sources = build_question_prompt(user_message)
                 st.code(full_prompt)
                 status.update(label="Prompt computed")
         else:
             with st.spinner("Researching..."):
-                full_prompt = build_question_prompt(user_message)
+                full_prompt, sources = build_question_prompt(user_message)
 
         # Send prompt to LLM.
         with st.spinner("Thinking..."):
@@ -457,6 +465,22 @@ if user_message:
         with st.container():
             # Stream the LLM response.
             response = st.write_stream(response_gen)
+            
+            # --- NEW CODE: DISPLAY SOURCES ---
+            if sources:
+                with st.expander("📚 Sources & References"):
+                    for doc in sources:
+                        # Extract metadata (adjust keys based on how you created the index)
+                        source_name = doc.metadata.get('source', 'Unknown Source')
+                        page_num = doc.metadata.get('page', '')
+                        
+                        # Create a label for the source
+                        st.markdown(f"**{source_name}** {f'(Page {page_num})' if page_num else ''}")
+                        
+                        # Show a snippet of the content
+                        st.caption(doc.page_content[:300] + "...")
+                        st.divider()
+            # ---------------------------------
 
             # Add messages to chat history.
             st.session_state.messages.append({"role": "user", "content": user_message})
